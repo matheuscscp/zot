@@ -634,6 +634,60 @@ type Policy struct {
 	Users   []string
 	Actions []string
 	Groups  []string
+
+	// Conditions is an optional list of CEL expressions that must all evaluate
+	// to true for this policy entry to grant access. When any condition is
+	// false (or fails to evaluate) the policy is ignored.
+	Conditions []Condition
+}
+
+// Condition is a CEL boolean expression gating a Policy entry, modeled after
+// conditional access in cloud IAM systems. The expression is evaluated against
+// a `req` struct containing:
+//
+//   - req.now                   current time as an RFC 3339 string (use timestamp() to parse)
+//   - req.method                raw HTTP method of the originating request (e.g. "GET", "PUT")
+//   - req.userAgent             User-Agent header
+//   - req.action                abstract action being authorized ("read", "create", "update", "delete")
+//   - req.repository            the requested repository, when known
+//   - req.reference             tag or digest, when the route has one
+//   - req.referenceType         "tag", "digest", or "" when the route has no reference
+//   - req.tag                   the tag, when reference is a tag
+//   - req.digest                the digest, when reference is a digest
+//   - req.user.username         authenticated username
+//   - req.user.groups           authenticated user's groups (list<string>)
+//   - req.auth.anonymous        convenience for `req.user.username == ""`
+//   - req.auth.admin            true when the user matches the admin policy
+//   - req.client.ip             TCP peer address from RemoteAddr (port stripped); always trustworthy
+//   - req.client.forwardedFor   X-Forwarded-For chain as list<string>, left to right; untrusted
+//   - req.tls.enabled           whether the request arrived over TLS at zot
+//   - req.tls.version           TLS version string ("1.2", "1.3", ...) when applicable
+//   - req.claims                authn-time attribute bag (map), populated by the active authn flow
+//
+// Use `req.action` for action gating (it incorporates create-vs-update logic);
+// `req.method` is the raw verb escape hatch.
+//
+// `req.claims` is a generic surface, not tied to OIDC: today the OIDC bearer
+// flow feeds the ID token's claim set into it, and other flows (browser
+// OpenID, mTLS cert attributes, ...) can feed this surface as they grow that
+// capability.
+//
+// Network gates: `req.client.ip` is always the TCP peer (the proxy, behind a
+// reverse proxy). `req.client.forwardedFor` is the raw X-Forwarded-For header
+// chain — useful but untrusted, since any client can set that header. The
+// idiomatic pattern is to gate on the chain only after asserting the TCP
+// peer is your trusted proxy:
+//
+//	req.client.ip == "10.0.0.5" && req.client.forwardedFor[0].startsWith("192.0.2.")
+//
+// When the expression evaluates to false, Message is surfaced to the client
+// in the 403 response body's error detail under the "reason" key (so the
+// client knows why the policy did not apply) and is also logged for operator
+// diagnosis. Internal lookup or evaluation failures are *not* surfaced — the
+// client just gets a generic deny — so as not to leak implementation issues.
+type Condition struct {
+	Expression string
+	Message    string
 }
 
 type Metrics struct {

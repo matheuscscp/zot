@@ -21,6 +21,7 @@ import (
 
 	"zotregistry.dev/zot/v2/errors"
 	"zotregistry.dev/zot/v2/pkg/api/config"
+	"zotregistry.dev/zot/v2/pkg/cel"
 	"zotregistry.dev/zot/v2/pkg/common"
 	ext "zotregistry.dev/zot/v2/pkg/extensions"
 	events "zotregistry.dev/zot/v2/pkg/extensions/events"
@@ -61,6 +62,10 @@ type Controller struct {
 	chosenPort atomic.Int64
 	// TLS certificate management
 	TlsWatcher atomic.Pointer[TlsConfigWatcher]
+	// compiledConditions holds the pre-compiled CEL programs for every policy
+	// condition in the active access-control config, keyed by expression
+	// string. Rebuilt at startup and on hot reload via LoadNewConfig.
+	compiledConditions atomic.Pointer[map[string]*cel.Expression]
 }
 
 func NewController(appConfig *config.Config) *Controller {
@@ -122,6 +127,15 @@ func NewController(appConfig *config.Config) *Controller {
 		audit := log.NewAuditLogger(appConfig.Log.Level, appConfig.Log.Audit)
 		controller.Audit = audit
 	}
+
+	// Pre-compile policy conditions. Errors were already surfaced by config
+	// validation; if anything still fails here it's a programmer bug.
+	programs, err := CompileAccessControl(appConfig.HTTP.AccessControl)
+	if err != nil {
+		logger.Panic().Err(err).Msg("failed to compile access control policy conditions")
+	}
+
+	controller.compiledConditions.Store(&programs)
 
 	return &controller
 }
@@ -458,6 +472,14 @@ func (c *Controller) InitEventRecorder() error {
 func (c *Controller) LoadNewConfig(newConfig *config.Config) {
 	// Update only reloadable config fields atomically
 	c.Config.UpdateReloadableConfig(newConfig)
+
+	// Refresh compiled policy conditions to reflect the new access-control
+	// config. Errors were caught during validation in LoadConfiguration.
+	if programs, err := CompileAccessControl(newConfig.HTTP.AccessControl); err != nil {
+		c.Log.Error().Err(err).Msg("failed to recompile access control policy conditions")
+	} else {
+		c.compiledConditions.Store(&programs)
+	}
 
 	// Operations that need to happen after config update
 	authConfig := c.Config.CopyAuthConfig()
